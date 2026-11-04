@@ -35,7 +35,7 @@ const LinkModal: React.FC<LinkModalProps> = ({ isOpen, onClose, onSave, categori
         setUrl(initialData.url);
         setIconUrl(initialData.icon || '');
         setDescription(initialData.description || '');
-        setCategoryId(initialData.categoryId);
+        setCategoryId(categories.some(c => c.id === initialData.categoryId) ? initialData.categoryId : (categories[0]?.id || 'common'));
         setPinned(initialData.pinned || false);
         // Default to true even for edits, allowing user to opt-out manually
         setAutoFetchIcon(true);
@@ -121,7 +121,8 @@ const LinkModal: React.FC<LinkModalProps> = ({ isOpen, onClose, onSave, categori
         const [desc, cat] = await Promise.all([descPromise, catPromise]);
         
         if (desc) setDescription(desc);
-        if (cat) setCategoryId(cat);
+        // AI 返回的分类必须真实存在，否则保持当前选择
+        if (cat && categories.some(c => c.id === cat)) setCategoryId(cat);
     } catch (e) {
         console.error("AI Assist failed", e);
     } finally {

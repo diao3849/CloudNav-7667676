@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { X, Cloud, Download, Upload, CheckCircle2, AlertCircle, RefreshCw, Save } from 'lucide-react';
 import { Category, LinkItem, WebDavConfig } from '../types';
-import { checkWebDavConnection, uploadBackup, downloadBackup } from '../services/webDavService';
+import { checkWebDavConnection, uploadBackup, downloadBackup, getLastWebDavError } from '../services/webDavService';
 import { generateBookmarkHtml, downloadHtmlFile } from '../services/exportService';
 
 interface BackupModalProps {
@@ -56,7 +56,7 @@ const BackupModal: React.FC<BackupModalProps> = ({
         setStatusMsg('备份成功！');
     } else {
         setSyncStatus('error');
-        setStatusMsg('上传失败，请检查配置或网络。');
+        setStatusMsg(`上传失败，请检查配置或网络。${getLastWebDavError() ? `（${getLastWebDavError()}）` : ''}`);
     }
   };
 
@@ -73,7 +73,7 @@ const BackupModal: React.FC<BackupModalProps> = ({
         setStatusMsg('恢复成功！');
     } else {
         setSyncStatus('error');
-        setStatusMsg('下载失败或文件格式错误。');
+        setStatusMsg(`下载失败或文件格式错误。${getLastWebDavError() ? `（${getLastWebDavError()}）` : ''}`);
     }
   };
 
@@ -161,7 +161,7 @@ const BackupModal: React.FC<BackupModalProps> = ({
                             <Save size={12} /> 保存配置
                         </button>
                         {testResult === 'success' && <span className="text-xs text-green-500 flex items-center gap-1"><CheckCircle2 size={12}/> 连接成功</span>}
-                        {testResult === 'fail' && <span className="text-xs text-red-500 flex items-center gap-1"><AlertCircle size={12}/> 连接失败</span>}
+                        {testResult === 'fail' && <span className="text-xs text-red-500 flex items-center gap-1"><AlertCircle size={12}/> 连接失败{getLastWebDavError() ? `（${getLastWebDavError()}）` : ''}</span>}
                     </div>
                 </div>
             </section>

@@ -1,6 +1,16 @@
 
-export const onRequestPost = async (context: { request: Request }) => {
-  const { request } = context;
+interface Env {
+  PASSWORD: string;
+}
+
+export const onRequestPost = async (context: { request: Request; env: Env }) => {
+  const { request, env } = context;
+
+  // 只允许登录后的管理员使用，避免被当成开放代理
+  const providedPassword = request.headers.get('x-auth-password');
+  if (!env.PASSWORD || providedPassword !== env.PASSWORD) {
+    return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
+  }
   
   try {
     const body = await request.json() as any;

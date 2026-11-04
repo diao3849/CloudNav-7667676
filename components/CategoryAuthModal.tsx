@@ -1,23 +1,35 @@
 import React, { useState } from 'react';
 import { Lock, ArrowRight, Loader2, X } from 'lucide-react';
-import { Category } from '../types';
+import { Category, LOCKED_PLACEHOLDER } from '../types';
 
 interface CategoryAuthModalProps {
   isOpen: boolean;
   onClose: () => void;
   category: Category | null;
   onUnlock: (categoryId: string) => void;
+  // 未登录时浏览器里没有分类密码，由服务器验证并返回该分类的链接
+  onVerify?: (categoryId: string, password: string) => Promise<boolean>;
 }
 
-const CategoryAuthModal: React.FC<CategoryAuthModalProps> = ({ isOpen, onClose, category, onUnlock }) => {
+const CategoryAuthModal: React.FC<CategoryAuthModalProps> = ({ isOpen, onClose, category, onUnlock, onVerify }) => {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
 
   if (!isOpen || !category) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (password === category.password) {
+    let ok = false;
+    if (category.password === LOCKED_PLACEHOLDER) {
+        if (!onVerify) return;
+        setIsLoading(true);
+        ok = await onVerify(category.id, password);
+        setIsLoading(false);
+    } else {
+        ok = password === category.password;
+    }
+    if (ok) {
         onUnlock(category.id);
         setPassword('');
         setError('');
@@ -64,10 +76,10 @@ const CategoryAuthModal: React.FC<CategoryAuthModalProps> = ({ isOpen, onClose, 
 
           <button
             type="submit"
-            disabled={!password}
+            disabled={!password || isLoading}
             className="w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-3 px-4 rounded-xl transition-colors shadow-lg shadow-amber-500/30 flex items-center justify-center gap-2"
           >
-            解锁 <ArrowRight size={18} />
+            {isLoading ? <Loader2 className="animate-spin" /> : <>解锁 <ArrowRight size={18} /></>}
           </button>
         </form>
       </div>

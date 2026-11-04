@@ -106,6 +106,9 @@ export const onRequestPost = async (context: { request: Request; env: Env }) => 
     // 5. Append
     // @ts-ignore
     currentData.links = [newLink, ...(currentData.links || [])];
+    // 更新版本号，让已经打开的网页知道云端变了，不会用旧数据把这条链接覆盖掉
+    // @ts-ignore
+    currentData.version = Math.max(Date.now(), (Number(currentData.version) || 0) + 1);
 
     // 6. Save back to KV
     await env.CLOUDNAV_KV.put('app_data', JSON.stringify(currentData));

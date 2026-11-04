@@ -10,6 +10,18 @@ import {
     LinkItem, Category, DEFAULT_CATEGORIES, INITIAL_LINKS, 
     WebDavConfig, AIConfig, SiteSettings, SearchEngine, DEFAULT_SEARCH_ENGINES 
 } from './types';
+
+// 链接指向的分类不存在时（例如删掉了“常用推荐”、AI 返回了不存在的分类），
+// 把它放回一个存在的分类，避免链接从页面上“隐身”
+const fixOrphanLinks = (links: LinkItem[], cats: Category[]): LinkItem[] => {
+  if (!cats || cats.length === 0) return links;
+  const ids = new Set(cats.map(c => c.id));
+  if (links.every(l => ids.has(l.categoryId))) return links;
+  const fallbackId = ids.has('common') ? 'common' : cats[0].id;
+  return links.map(l => ids.has(l.categoryId) ? l : { ...l, categoryId: fallbackId });
+};
+
+type SavePayload = { links: LinkItem[]; categories: Category[]; settings: SiteSettings };
 import Icon from './components/Icon';
 import LinkModal from './components/LinkModal';
 import AuthModal from './components/AuthModal';
@@ -120,6 +132,17 @@ function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
 
+  // 云端同步状态
+  const cloudVersionRef = useRef<number>(0);       // 本页数据对应的云端版本号
+  const isRedactedRef = useRef(false);             // 本页数据是否是未登录时拿到的（不含私密目录）
+  const authTokenRef = useRef('');
+  const pendingSaveRef = useRef<SavePayload | null>(null);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isSavingRef = useRef(false);
+  const lastSaveAtRef = useRef(0);
+
+  useEffect(() => { authTokenRef.current = authToken; }, [authToken]);
+
   // --- Helpers ---
 
   const loadFromLocal = () => {
@@ -127,7 +150,7 @@ function App() {
     if (stored) {
       try {
         const parsed = JSON.parse(stored);
-        setLinks(parsed.links || INITIAL_LINKS);
+        setLinks(fixOrphanLinks(parsed.links || INITIAL_LINKS, parsed.categories || DEFAULT_CATEGORIES));
         setCategories(parsed.categories || DEFAULT_CATEGORIES);
         if (parsed.settings) setSiteSettings(prev => ({ ...prev, ...parsed.settings }));
       } catch (e) {
@@ -140,45 +163,126 @@ function App() {
     }
   };
 
-  const syncToCloud = async (newLinks: LinkItem[], newCategories: Category[], newSettings: SiteSettings, token: string) => {
-    setSyncStatus('saving');
-    try {
-        const response = await fetch('/api/storage', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'x-auth-password': token
-            },
-            body: JSON.stringify({ links: newLinks, categories: newCategories, settings: newSettings })
-        });
+  const fetchCloudData = async (token: string) => {
+      const res = await fetch('/api/storage', {
+          headers: token ? { 'x-auth-password': token } : {},
+          cache: 'no-store'
+      });
+      if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+      return res.json();
+  };
 
-        if (response.status === 401) {
-            setAuthToken('');
-            localStorage.removeItem(AUTH_KEY);
-            setIsAuthOpen(true);
-            setSyncStatus('error');
-            return false;
-        }
+  // 用云端数据替换页面上的数据
+  const applyCloudData = (data: any) => {
+      const cats: Category[] = data.categories || DEFAULT_CATEGORIES;
+      const fixedLinks = fixOrphanLinks(data.links || [], cats);
+      setLinks(fixedLinks);
+      setCategories(cats);
+      if (data.settings) setSiteSettings(prev => ({ ...prev, ...data.settings }));
+      cloudVersionRef.current = Number(data.version) || 0;
+      isRedactedRef.current = !!data.redacted;
+      if (data.redacted) setUnlockedCategoryIds(new Set());
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ ...data, links: fixedLinks, categories: cats }));
+  };
 
-        if (!response.ok) throw new Error('Network response was not ok');
-        
-        setSyncStatus('saved');
-        setTimeout(() => setSyncStatus('idle'), 2000);
-        return true;
-    } catch (error) {
-        console.error("Sync failed", error);
-        setSyncStatus('error');
-        return false;
-    }
+  // 云端已被别处修改：让用户选择载入云端最新数据，还是用本页覆盖
+  const handleSaveConflict = async (payload: SavePayload, cloudVersion: number): Promise<SavePayload | null> => {
+      let latest: any = null;
+      try { latest = await fetchCloudData(authTokenRef.current); } catch (e) {}
+      const useCloud = confirm('云端数据已经在别处（其他设备、浏览器或扩展）更新过，和本页不一致。\n\n点“确定”：载入云端最新数据，放弃本页刚才的改动（推荐）。\n点“取消”：用本页数据覆盖云端，别处的改动会丢失。');
+      if (useCloud) {
+          pendingSaveRef.current = null;
+          if (latest) {
+              applyCloudData(latest);
+              setSyncStatus('idle');
+          } else {
+              window.location.reload();
+          }
+          return null;
+      }
+      cloudVersionRef.current = Math.max(cloudVersion, Number(latest?.version) || 0);
+      return pendingSaveRef.current || payload;
+  };
+
+  // 把排队中的最新数据上传到云端。同一时间只有一个请求，两次写入至少间隔 1.1 秒
+  // （Cloudflare KV 同一个键每秒只能写 1 次），并带上版本号，避免旧页面覆盖新数据
+  const flushSave = async (force = false) => {
+      if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null; }
+      if (isSavingRef.current) return;
+      const payload = pendingSaveRef.current;
+      const token = authTokenRef.current;
+      if (!payload || !token) return;
+
+      const wait = lastSaveAtRef.current + 1100 - Date.now();
+      if (wait > 0 && !force) {
+          saveTimerRef.current = setTimeout(() => flushSave(), wait);
+          return;
+      }
+
+      pendingSaveRef.current = null;
+      isSavingRef.current = true;
+      lastSaveAtRef.current = Date.now();
+      let retryPayload: SavePayload | null = null;
+      try {
+          const response = await fetch('/api/storage', {
+              method: 'POST',
+              headers: {
+                  'Content-Type': 'application/json',
+                  'x-auth-password': token,
+                  'x-base-version': String(cloudVersionRef.current)
+              },
+              body: JSON.stringify(payload)
+          });
+
+          if (response.status === 401) {
+              authTokenRef.current = '';
+              setAuthToken('');
+              localStorage.removeItem(AUTH_KEY);
+              setIsAuthOpen(true);
+              setSyncStatus('error');
+          } else if (response.status === 409) {
+              const body = await response.json().catch(() => ({}));
+              retryPayload = await handleSaveConflict(payload, Number(body.version) || 0);
+          } else if (!response.ok) {
+              throw new Error('Network response was not ok');
+          } else {
+              const body = await response.json().catch(() => ({}));
+              if (body.version) cloudVersionRef.current = Number(body.version);
+              if (!pendingSaveRef.current) {
+                  setSyncStatus('saved');
+                  setTimeout(() => setSyncStatus(s => s === 'saved' ? 'idle' : s), 2000);
+              }
+          }
+      } catch (error) {
+          console.error("Sync failed", error);
+          setSyncStatus('error');
+      } finally {
+          isSavingRef.current = false;
+      }
+
+      if (retryPayload && !pendingSaveRef.current) pendingSaveRef.current = retryPayload;
+      if (pendingSaveRef.current && authTokenRef.current) {
+          setSyncStatus('saving');
+          flushSave();
+      }
   };
 
   const updateData = (newLinks: LinkItem[], newCategories: Category[], newSettings: SiteSettings = siteSettings) => {
+      if (authToken && isRedactedRef.current) {
+          alert('当前页面的数据不完整，请刷新页面后再修改。');
+          return;
+      }
+      newLinks = fixOrphanLinks(newLinks, newCategories);
       setLinks(newLinks);
       setCategories(newCategories);
       setSiteSettings(newSettings);
       localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ links: newLinks, categories: newCategories, settings: newSettings }));
       if (authToken) {
-          syncToCloud(newLinks, newCategories, newSettings, authToken);
+          // 短时间内的连续改动（拖拽排序等）合并成一次上传
+          pendingSaveRef.current = { links: newLinks, categories: newCategories, settings: newSettings };
+          setSyncStatus('saving');
+          if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+          saveTimerRef.current = setTimeout(() => flushSave(), 600);
       }
   };
 
@@ -188,7 +292,10 @@ function App() {
       document.documentElement.classList.add('dark');
     }
     const savedToken = localStorage.getItem(AUTH_KEY);
-    if (savedToken) setAuthToken(savedToken);
+    if (savedToken) {
+        authTokenRef.current = savedToken;
+        setAuthToken(savedToken);
+    }
 
     const savedWebDav = localStorage.getItem(WEBDAV_CONFIG_KEY);
     if (savedWebDav) {
@@ -213,17 +320,18 @@ function App() {
 
     const initData = async () => {
         try {
-            const res = await fetch('/api/storage');
-            if (res.ok) {
-                const data = await res.json();
-                if (data.links && data.links.length > 0) {
-                    setLinks(data.links);
-                    setCategories(data.categories || DEFAULT_CATEGORIES);
-                    if (data.settings) setSiteSettings(prev => ({ ...prev, ...data.settings }));
-                    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
-                    return;
-                }
-            } 
+            const data = await fetchCloudData(savedToken || '');
+            if (data.redacted && savedToken) {
+                // 保存的管理密码已失效（服务器没有返回完整数据），退出登录
+                authTokenRef.current = '';
+                setAuthToken('');
+                localStorage.removeItem(AUTH_KEY);
+            }
+            if ((data.links && data.links.length > 0) || (data.categories && data.categories.length > 0)) {
+                applyCloudData(data);
+                return;
+            }
+            cloudVersionRef.current = Number(data.version) || 0;
         } catch (e) {
             console.warn("Failed to fetch from cloud, falling back to local.", e);
         }
@@ -231,6 +339,27 @@ function App() {
     };
 
     initData();
+  }, []);
+
+  // 切回这个标签页时，如果云端有更新（别的设备或扩展改过），自动载入最新数据；
+  // 离开标签页时，把还没上传的改动立即上传
+  useEffect(() => {
+      const handleVisibility = async () => {
+          if (document.visibilityState === 'hidden') {
+              if (pendingSaveRef.current) flushSave(true);
+              return;
+          }
+          if (pendingSaveRef.current || isSavingRef.current) return;
+          try {
+              const data = await fetchCloudData(authTokenRef.current);
+              if (pendingSaveRef.current || isSavingRef.current) return;
+              if ((Number(data.version) || 0) > cloudVersionRef.current) {
+                  applyCloudData(data);
+              }
+          } catch (e) {}
+      };
+      document.addEventListener('visibilitychange', handleVisibility);
+      return () => document.removeEventListener('visibilitychange', handleVisibility);
   }, []);
 
   useEffect(() => {
@@ -312,25 +441,57 @@ function App() {
   };
 
   // --- Handlers ---
+  // 登录只验证密码，不再把页面上的数据写到云端；登录后载入云端最新的完整数据
   const handleLogin = async (password: string): Promise<boolean> => {
       try {
-        const response = await fetch('/api/storage', {
+        const response = await fetch('/api/storage?action=check', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
                 'x-auth-password': password
             },
-            body: JSON.stringify({ links, categories, settings: siteSettings })
+            body: '{}'
         });
-        
-        if (response.ok) {
-            setAuthToken(password);
-            localStorage.setItem(AUTH_KEY, password);
-            setIsAuthOpen(false);
+        if (!response.ok) return false;
+
+        const data = await fetchCloudData(password);
+        authTokenRef.current = password;
+        setAuthToken(password);
+        localStorage.setItem(AUTH_KEY, password);
+        setIsAuthOpen(false);
+
+        const cloudEmpty = !(data.links && data.links.length) && !(data.categories && data.categories.length);
+        if (cloudEmpty) {
+            // 全新部署、云端还没有数据：和以前一样，把当前页面上的数据作为初始数据存上去
+            cloudVersionRef.current = Number(data.version) || 0;
+            isRedactedRef.current = false;
+            pendingSaveRef.current = { links, categories, settings: siteSettings };
+            setSyncStatus('saving');
+            flushSave(true);
+        } else {
+            applyCloudData(data);
             setSyncStatus('saved');
-            return true;
+            setTimeout(() => setSyncStatus(s => s === 'saved' ? 'idle' : s), 2000);
         }
-        return false;
+        return true;
+      } catch (e) {
+          return false;
+      }
+  };
+
+  // 未登录时解锁私密目录：密码由服务器验证，验证通过后才拿到该目录的链接
+  const handleVerifyCategoryPassword = async (catId: string, password: string): Promise<boolean> => {
+      try {
+          const res = await fetch('/api/storage?action=unlock', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ categoryId: catId, password })
+          });
+          if (!res.ok) return false;
+          const data = await res.json();
+          const catLinks: LinkItem[] = data.links || [];
+          setLinks(prev => [...prev.filter(l => l.categoryId !== catId), ...catLinks]);
+          return true;
       } catch (e) {
           return false;
       }
@@ -427,9 +588,10 @@ function App() {
   const handleDeleteCategory = (catId: string) => {
       if (!authToken) { setIsAuthOpen(true); return; }
       const newCats = categories.filter(c => c.id !== catId);
-      const targetId = 'common'; 
-      const newLinks = links.map(l => l.categoryId === catId ? { ...l, categoryId: targetId } : l);
       if (newCats.length === 0) newCats.push(DEFAULT_CATEGORIES[0]);
+      // 优先移到“常用推荐”；它不存在（或正是被删的分类）时移到第一个分类
+      const targetId = newCats.some(c => c.id === 'common') ? 'common' : newCats[0].id;
+      const newLinks = links.map(l => l.categoryId === catId ? { ...l, categoryId: targetId } : l);
       updateData(newLinks, newCats);
   };
 
@@ -595,13 +757,14 @@ function App() {
           </div>
       )}
 
-      <AuthModal isOpen={isAuthOpen} onLogin={handleLogin} />
+      <AuthModal isOpen={isAuthOpen} onLogin={handleLogin} onClose={() => setIsAuthOpen(false)} />
       
       <CategoryAuthModal 
         isOpen={!!catAuthModalData}
         category={catAuthModalData}
         onClose={() => setCatAuthModalData(null)}
         onUnlock={handleUnlockCategory}
+        onVerify={handleVerifyCategoryPassword}
       />
 
       <CategoryManagerModal 

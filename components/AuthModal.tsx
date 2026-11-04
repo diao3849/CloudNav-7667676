@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
-import { Lock, ArrowRight, Loader2 } from 'lucide-react';
+import { Lock, ArrowRight, Loader2, X } from 'lucide-react';
 
 interface AuthModalProps {
   isOpen: boolean;
   onLogin: (password: string) => Promise<boolean>;
+  onClose?: () => void;
 }
 
-const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onLogin }) => {
+const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onLogin, onClose }) => {
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
@@ -27,7 +28,12 @@ const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onLogin }) => {
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md">
-      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-200 dark:border-slate-700 p-8">
+      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-200 dark:border-slate-700 p-8 relative">
+        {onClose && (
+          <button type="button" onClick={onClose} className="absolute top-4 right-4 p-1 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full" title="关闭">
+            <X size={20} className="text-slate-400" />
+          </button>
+        )}
         <div className="flex flex-col items-center mb-6">
           <div className="w-16 h-16 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center mb-4 text-blue-600 dark:text-blue-400">
             <Lock size={32} />

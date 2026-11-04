@@ -10,6 +10,9 @@ export interface LinkItem {
   pinned?: boolean; // New field for pinning
 }
 
+// 未登录时服务器不下发分类密码，用这个占位符代替（与 functions/api/storage.ts 保持一致）
+export const LOCKED_PLACEHOLDER = '__cloudnav_locked__';
+
 export interface Category {
   id: string;
   name: string;

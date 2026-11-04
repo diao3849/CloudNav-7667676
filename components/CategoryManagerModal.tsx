@@ -244,7 +244,12 @@ const CategoryManagerModal: React.FC<CategoryManagerModalProps> = ({
                             <Merge size={14} />
                         </button>
                         <button 
-                        onClick={() => { if(confirm(`确定删除"${cat.name}"分类吗？该分类下的书签将移动到"常用推荐"。`)) onDeleteCategory(cat.id); }}
+                        onClick={() => {
+                            const rest = categories.filter(c => c.id !== cat.id);
+                            const target = rest.find(c => c.id === 'common') || rest[0];
+                            const targetName = target ? target.name : '常用推荐';
+                            if(confirm(`确定删除"${cat.name}"分类吗？该分类下的书签将移动到"${targetName}"。`)) onDeleteCategory(cat.id);
+                        }}
                         className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-slate-200 dark:hover:bg-slate-600 rounded"
                         title="删除"
                         >
