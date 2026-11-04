@@ -132,6 +132,13 @@ function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
 
+  // 手机长按弹出菜单（iOS Safari 长按链接不会触发 contextmenu）
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressStartRef = useRef<{ x: number, y: number } | null>(null);
+  const longPressFiredRef = useRef(false);   // 本次触摸已经触发了长按，松手时不要打开链接
+  const menuOpenedAtRef = useRef(0);         // 菜单弹出的时间，防止刚弹出就被随后的 click 关掉
+  const menuClosedByTouchAtRef = useRef(0);  // 触摸菜单外面关闭菜单的时间，这次点按不打开链接
+
   // 云端同步状态
   const cloudVersionRef = useRef<number>(0);       // 本页数据对应的云端版本号
   const isRedactedRef = useRef(false);             // 本页数据是否是未登录时拿到的（不含私密目录）
@@ -373,8 +380,20 @@ function App() {
   useEffect(() => {
       const handleClickOutside = (e: MouseEvent) => {
           if (openMenuId) setOpenMenuId(null);
+          // 长按刚弹出菜单时，松手可能还会补发一次 click，忽略它
+          if (Date.now() - menuOpenedAtRef.current < 600) return;
           if (contextMenu && contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
              setContextMenu(null);
+          }
+      };
+
+      // iOS 上点空白处不一定会产生 click，所以触摸菜单外面也关闭菜单
+      const handleTouchOutside = (e: TouchEvent) => {
+          if (!contextMenu) return;
+          if (Date.now() - menuOpenedAtRef.current < 600) return;
+          if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
+              menuClosedByTouchAtRef.current = Date.now();
+              setContextMenu(null);
           }
       };
       
@@ -383,6 +402,7 @@ function App() {
       };
 
       window.addEventListener('click', handleClickOutside);
+      window.addEventListener('touchstart', handleTouchOutside, { passive: true });
       window.addEventListener('scroll', handleScroll, true); 
       
       const handleGlobalContextMenu = (e: MouseEvent) => {
@@ -395,6 +415,7 @@ function App() {
 
       return () => {
           window.removeEventListener('click', handleClickOutside);
+          window.removeEventListener('touchstart', handleTouchOutside);
           window.removeEventListener('scroll', handleScroll, true);
           window.removeEventListener('contextmenu', handleGlobalContextMenu);
       }
@@ -656,6 +677,70 @@ function App() {
 
   // --- Render Components ---
 
+  // 在 (x, y) 处弹出链接菜单，靠近屏幕边缘时往里挪
+  const openLinkMenu = (clientX: number, clientY: number, link: LinkItem) => {
+      let x = clientX;
+      let y = clientY;
+      if (x + 180 > window.innerWidth) x = window.innerWidth - 190;
+      if (y + 220 > window.innerHeight) y = window.innerHeight - 230;
+      x = Math.max(8, x);
+      y = Math.max(8, y);
+      setContextMenu({ x, y, link });
+  };
+
+  const cancelLongPress = () => {
+      if (longPressTimerRef.current) {
+          clearTimeout(longPressTimerRef.current);
+          longPressTimerRef.current = null;
+      }
+      longPressStartRef.current = null;
+  };
+
+  const handleCardTouchStart = (e: React.TouchEvent, link: LinkItem) => {
+      cancelLongPress();
+      longPressFiredRef.current = false;
+      if (e.touches.length !== 1) return; // 双指缩放等不算长按
+      const t = e.touches[0];
+      longPressStartRef.current = { x: t.clientX, y: t.clientY };
+      longPressTimerRef.current = setTimeout(() => {
+          longPressTimerRef.current = null;
+          const start = longPressStartRef.current;
+          if (!start) return;
+          longPressFiredRef.current = true;
+          menuOpenedAtRef.current = Date.now();
+          openLinkMenu(start.x, start.y, link);
+          try { navigator.vibrate?.(10); } catch { /* iOS 不支持震动，忽略 */ }
+      }, 500);
+  };
+
+  const handleCardTouchMove = (e: React.TouchEvent) => {
+      const start = longPressStartRef.current;
+      if (!start || !longPressTimerRef.current) return;
+      const t = e.touches[0];
+      // 手指移动超过 10px 视为滚动，取消长按
+      if (!t || Math.abs(t.clientX - start.x) > 10 || Math.abs(t.clientY - start.y) > 10) {
+          cancelLongPress();
+      }
+  };
+
+  const handleCardTouchEnd = (e: React.TouchEvent) => {
+      cancelLongPress();
+      if (longPressFiredRef.current) {
+          // 已经弹出菜单：阻止松手后补发的 click，不打开链接
+          if (e.cancelable) e.preventDefault();
+      }
+  };
+
+  const handleCardClick = (e: React.MouseEvent) => {
+      const justClosedMenu = Date.now() - menuClosedByTouchAtRef.current < 600;
+      if (longPressFiredRef.current || justClosedMenu) {
+          e.preventDefault();
+          e.stopPropagation();
+          longPressFiredRef.current = false;
+          menuClosedByTouchAtRef.current = 0;
+      }
+  };
+
   const renderLinkCard = (link: LinkItem) => {
       const iconDisplay = link.icon ? (
          <img 
@@ -680,14 +765,18 @@ function App() {
             onContextMenu={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                let x = e.clientX;
-                let y = e.clientY;
-                // Boundary adjustment
-                if (x + 180 > window.innerWidth) x = window.innerWidth - 190;
-                if (y + 220 > window.innerHeight) y = window.innerHeight - 230;
-                setContextMenu({ x, y, link });
+                // 长按已经弹出了菜单（部分安卓浏览器长按也会发 contextmenu），不重复处理
+                if (longPressFiredRef.current) return false;
+                openLinkMenu(e.clientX, e.clientY, link);
                 return false;
             }}
+            onTouchStart={(e) => handleCardTouchStart(e, link)}
+            onTouchMove={handleCardTouchMove}
+            onTouchEnd={handleCardTouchEnd}
+            onTouchCancel={cancelLongPress}
+            onClick={handleCardClick}
+            draggable={false}
+            style={{ WebkitTouchCallout: 'none', WebkitUserSelect: 'none', userSelect: 'none' }}
             className={`group relative flex flex-col ${isSimple ? 'p-2' : 'p-3'} bg-white dark:bg-slate-800 rounded-xl border border-slate-100 dark:border-slate-700/50 shadow-sm hover:shadow-lg hover:border-blue-200 dark:hover:border-slate-600 hover:-translate-y-0.5 transition-all duration-200 hover:bg-blue-50 dark:hover:bg-slate-750`}
             title={link.description || link.url}
         >
